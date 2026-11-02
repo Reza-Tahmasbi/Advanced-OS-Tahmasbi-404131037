@@ -52,7 +52,7 @@ int main (int argc, char *argv[])
         printf("ELF64 detected\n");
     }
     else if (magic[EI_CLASS] == ELFCLASS32){
-        fprintf(stderr, "ELF32 is not supported in this loader");
+        fprintf(stderr, "ELF32 is not supported in this loader\n");
         close(fd);
         return 1;
     }
@@ -91,6 +91,30 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    if (header.e_machine != EM_X86_64){
+        fprintf(stderr, "Unsupported ELF machine\n");
+        close(fd);
+        return 1;
+    }
+
+    if (header.e_version != EV_CURRENT || magic[EI_VERSION] != EV_CURRENT){
+        fprintf(stderr, "Unsupported ELF version\n");
+        close(fd);
+        return 1;  
+    }
+
+    if (header.e_ehsize != sizeof(header)) {
+        fprintf(stderr, "Unexpected ELF header size\n");
+        close(fd);
+        return 1;
+    }
+
+    if (header.e_phentsize != sizeof(Elf64_Phdr)) {
+        fprintf(stderr, "Unexpected program header entry size\n");
+        close(fd);
+        return 1;
+    }
+
     // print information from the header
     printf("Entry point: 0x%llx\n",
         (unsigned long long)header.e_entry);
@@ -101,6 +125,42 @@ int main (int argc, char *argv[])
     printf("Program header count: %u\n",
         (unsigned int)header.e_phnum);
 
+    if (lseek(fd, (off_t)header.e_phoff, SEEK_SET) == -1){
+        perror("lseek");
+        close(fd);
+        return 1;
+    }
+
+    for (unsigned int i = 0; i< header.e_phnum; i++){
+
+        Elf64_Phdr segment;
+        bytes_read = read(fd, &segment, sizeof(segment));
+
+        // check the read result here
+        if (bytes_read == -1) {
+            perror("read");
+            close(fd);
+            return 1;
+        }
+
+        if (bytes_read != (ssize_t)sizeof(segment)) {
+            fprintf(stderr, "Could not read the complete program header entry\n");
+            close(fd);
+            return 1;
+        }
+
+        // inspect segment.p_type here
+        if (segment.p_type == PT_LOAD) {
+            printf("LOAD offset=0x%llx vaddr=0x%llx "
+                "filesz=0x%llx memsz=0x%llx flags=0x%x\n",
+                (unsigned long long)segment.p_offset,
+                (unsigned long long)segment.p_vaddr,
+                (unsigned long long)segment.p_filesz,
+                (unsigned long long)segment.p_memsz,
+                (unsigned int)segment.p_flags);
+        }
+
+    }
     // if the file is not closed yet, close it(on success path)
     if (close(fd) == -1) {
         perror("close");
