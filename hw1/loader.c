@@ -2,6 +2,7 @@
 #include <fcntl.h> //to open a file
 #include <unistd.h> //to close a file
 #include <elf.h>
+#include <sys/stat.h>
 
 // a simple file path reader
 int main (int argc, char *argv[])
@@ -115,6 +116,30 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    struct stat file_info;
+
+    if (fstat(fd, &file_info) == -1){
+        perror("fstat");
+        close(fd);
+        return 1;
+    }
+
+    if (!S_ISREG(file_info.st_mode) || file_info.st_size < 0) {
+        fprintf(stderr, "Expected a regular file with a valid size\n");
+        close(fd);
+        return 1;
+    }
+
+    Elf64_Xword file_size = (Elf64_Xword)file_info.st_size;
+
+    if (header.e_phoff > file_size ||
+        header.e_phnum >
+            (file_size - header.e_phoff) / sizeof(Elf64_Phdr)) {
+        fprintf(stderr, "Program header table is outside the file\n");
+        close(fd);
+        return 1;
+    }
+    
     // print information from the header
     printf("Entry point: 0x%llx\n",
         (unsigned long long)header.e_entry);
