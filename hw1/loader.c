@@ -3,6 +3,7 @@
 #include <unistd.h> //to close a file
 #include <elf.h>
 #include <sys/stat.h>
+#include <stdint.h>
 
 // a simple file path reader
 int main (int argc, char *argv[])
@@ -139,7 +140,7 @@ int main (int argc, char *argv[])
         close(fd);
         return 1;
     }
-    
+
     // print information from the header
     printf("Entry point: 0x%llx\n",
         (unsigned long long)header.e_entry);
@@ -176,6 +177,25 @@ int main (int argc, char *argv[])
 
         // inspect segment.p_type here
         if (segment.p_type == PT_LOAD) {
+            if (segment.p_filesz > segment.p_memsz) {
+                fprintf(stderr, "Segment file size exceeds memory size\n");
+                close(fd);
+                return 1;
+            }
+
+            if (segment.p_offset > file_size ||
+                segment.p_filesz > file_size - segment.p_offset) {
+                fprintf(stderr, "Segment data is outside the file\n");
+                close(fd);
+                return 1;
+            }
+
+            if (segment.p_memsz > UINT64_MAX - segment.p_vaddr) {
+                fprintf(stderr, "Segment virtual address range overflows\n");
+                close(fd);
+                return 1;
+            }
+
             printf("LOAD offset=0x%llx vaddr=0x%llx "
                 "filesz=0x%llx memsz=0x%llx flags=0x%x\n",
                 (unsigned long long)segment.p_offset,
