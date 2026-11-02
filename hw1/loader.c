@@ -62,7 +62,44 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    if (magic[EI_DATA] != ELFDATA2LSB){
+        fprintf(stderr, "Unsupported ELF byte order\n");
+        close(fd);
+        return 1;
+    }
 
+    // move back to the begining of the file
+    if (lseek(fd, 0, SEEK_SET) == -1){
+        perror("lseek");
+        close(fd);
+        return 1;
+    }
+
+    // read the complete ELF64 header
+    Elf64_Ehdr header;
+    bytes_read = read(fd, &header, sizeof(header));
+
+    if (bytes_read == -1) {
+        perror("read");
+        close(fd);
+        return 1;
+    } 
+
+    if (bytes_read != (ssize_t)sizeof(header)) {
+        fprintf(stderr, "Could not read the complete ELF header\n");
+        close(fd);
+        return 1;
+    }
+
+    // print information from the header
+    printf("Entry point: 0x%llx\n",
+        (unsigned long long)header.e_entry);
+
+    printf("Program header offset: %llu\n",
+        (unsigned long long)header.e_phoff);
+
+    printf("Program header count: %u\n",
+        (unsigned int)header.e_phnum);
 
     // if the file is not closed yet, close it(on success path)
     if (close(fd) == -1) {
