@@ -359,6 +359,58 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    if (header.e_type == ET_EXEC) {
+        extern char **environ;
+        const size_t stack_size = 1024 * 1024;
+        const size_t stack_alignment = 16;
+        const size_t fixed_words = 6;
+
+        size_t env_count = 0;
+        while (environ[env_count] != NULL) {
+            env_count++;
+        }
+
+        if (env_count >
+            (stack_size - stack_alignment) / sizeof(uintptr_t) - fixed_words) {
+            fprintf(stderr, "Initial stack entries exceed stack size\n");
+            return 1;
+        }
+
+        void *stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (stack == MAP_FAILED) {
+            perror("mmap stack");
+            return 1;
+        }
+
+        size_t word_count = env_count + fixed_words;
+        uintptr_t sp_address = (uintptr_t)stack + stack_size
+                            - word_count * sizeof(uintptr_t);
+        sp_address -= sp_address % stack_alignment;
+
+        uintptr_t *initial_sp = (uintptr_t *)sp_address;
+        size_t slot = 0;
+
+        initial_sp[slot++] = 1;
+        initial_sp[slot++] = (uintptr_t)argv[1];
+        initial_sp[slot++] = 0;
+
+        for (size_t i = 0; i < env_count; i++) {
+            initial_sp[slot++] = (uintptr_t)environ[i];
+        }
+
+        initial_sp[slot++] = 0;
+        initial_sp[slot++] = AT_NULL;
+        initial_sp[slot++] = 0;
+
+        printf("Initial stack: sp=%p argc=%llu argv[0]=%s\n",
+            (void *)initial_sp,
+            (unsigned long long)initial_sp[0],
+            (const char *)initial_sp[1]);
+        printf("Stack alignment remainder: %llu\n",
+            (unsigned long long)(sp_address % stack_alignment));
+    }
+
     // return success
     return 0;
 }
