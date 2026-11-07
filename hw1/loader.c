@@ -157,6 +157,16 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    long page_size_result = sysconf(_SC_PAGESIZE);
+
+    if (page_size_result <= 0) {
+        fprintf(stderr, "Could not determine page size\n");
+        close(fd);
+        return 1;
+    }
+
+    Elf64_Xword page_size = (Elf64_Xword)page_size_result;
+
     for (unsigned int i = 0; i< header.e_phnum; i++){
 
         Elf64_Phdr segment;
@@ -196,6 +206,34 @@ int main (int argc, char *argv[])
                 return 1;
             }
 
+            if (segment.p_memsz == 0) {
+                continue;
+            }
+            if (segment.p_vaddr % page_size != segment.p_offset % page_size) {
+                fprintf(stderr, "Segment address and file offset are not page-congruent\n");
+                close(fd);
+                return 1;
+            }
+            Elf64_Addr map_start =
+                segment.p_vaddr - segment.p_vaddr % page_size;
+
+            Elf64_Off map_offset =
+                segment.p_offset - segment.p_offset % page_size;
+
+            Elf64_Addr segment_end =
+                segment.p_vaddr + segment.p_memsz;
+
+            Elf64_Xword padding =
+                (page_size - segment_end % page_size) % page_size;
+
+            if (segment_end > UINT64_MAX - padding) {
+                fprintf(stderr, "Page-aligned segment range overflows\n");
+                close(fd);
+                return 1;
+            }
+
+            Elf64_Xword map_length =
+                segment_end + padding - map_start;
             printf("LOAD offset=0x%llx vaddr=0x%llx "
                 "filesz=0x%llx memsz=0x%llx flags=0x%x\n",
                 (unsigned long long)segment.p_offset,
@@ -203,6 +241,10 @@ int main (int argc, char *argv[])
                 (unsigned long long)segment.p_filesz,
                 (unsigned long long)segment.p_memsz,
                 (unsigned int)segment.p_flags);
+            printf("PLAN start=0x%llx offset=0x%llx length=0x%llx\n",
+                (unsigned long long)map_start,
+                (unsigned long long)map_offset,
+                (unsigned long long)map_length);
         }
 
     }
