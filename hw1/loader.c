@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/auxv.h>
 
 // a simple file path reader
 int main (int argc, char *argv[])
@@ -169,6 +170,11 @@ int main (int argc, char *argv[])
     }
 
     Elf64_Xword page_size = (Elf64_Xword)page_size_result;
+
+    Elf64_Addr target_phdr = 0;
+    int found_phdr = 0;
+    Elf64_Xword phdr_size =
+    (Elf64_Xword)header.e_phnum * header.e_phentsize;
 
     for (unsigned int i = 0; i< header.e_phnum; i++){
 
@@ -350,6 +356,16 @@ int main (int argc, char *argv[])
                             "Mapped address=%p offset=N/A length=0x%llx\n",
                             mapped, (unsigned long long)anon_length);
                 }
+                if (!found_phdr && (segment.p_flags & PF_R) &&
+                    header.e_phoff >= segment.p_offset) {
+                    Elf64_Off delta = header.e_phoff - segment.p_offset;
+
+                    if (delta <= segment.p_filesz &&
+                        phdr_size <= segment.p_filesz - delta) {
+                        target_phdr = segment.p_vaddr + delta;
+                        found_phdr = 1;
+                    }
+                }
             }
         }
     }
@@ -363,7 +379,41 @@ int main (int argc, char *argv[])
         extern char **environ;
         const size_t stack_size = 1024 * 1024;
         const size_t stack_alignment = 16;
-        const size_t fixed_words = 6;
+        if (!found_phdr) {
+            fprintf(stderr, "Program header table is not in a readable LOAD segment\n");
+            return 1;
+        }
+
+        uintptr_t random_addr = getauxval(AT_RANDOM);
+        if (random_addr == 0) {
+            fprintf(stderr, "Missing AT_RANDOM\n");
+            return 1;
+        }
+
+        uintptr_t auxv[][2] = {
+            { AT_PHDR, target_phdr },
+            { AT_PHENT, header.e_phentsize },
+            { AT_PHNUM, header.e_phnum },
+            { AT_PAGESZ, page_size },
+            { AT_BASE, 0 },
+            { AT_ENTRY, header.e_entry },
+            { AT_UID, getauxval(AT_UID) },
+            { AT_EUID, getauxval(AT_EUID) },
+            { AT_GID, getauxval(AT_GID) },
+            { AT_EGID, getauxval(AT_EGID) },
+            { AT_SECURE, getauxval(AT_SECURE) },
+            { AT_HWCAP, getauxval(AT_HWCAP) },
+            { AT_HWCAP2, getauxval(AT_HWCAP2) },
+            { AT_CLKTCK, getauxval(AT_CLKTCK) },
+            { AT_PLATFORM, getauxval(AT_PLATFORM) },
+            { AT_SYSINFO_EHDR, getauxval(AT_SYSINFO_EHDR) },
+            { AT_RANDOM, random_addr },
+            { AT_EXECFN, (uintptr_t)argv[1] },
+            { AT_NULL, 0 }
+        };
+
+        size_t aux_count = sizeof(auxv) / sizeof(auxv[0]);
+        const size_t fixed_words = 4 + 2 * aux_count;
 
         size_t env_count = 0;
         while (environ[env_count] != NULL) {
@@ -400,8 +450,15 @@ int main (int argc, char *argv[])
         }
 
         initial_sp[slot++] = 0;
-        initial_sp[slot++] = AT_NULL;
-        initial_sp[slot++] = 0;
+        size_t aux_start = slot;
+
+        for (size_t i = 0; i < aux_count; i++) {
+            initial_sp[slot++] = auxv[i][0];
+            initial_sp[slot++] = auxv[i][1];
+        }
+
+        printf("Stack AT_PHDR: 0x%llx\n",
+            (unsigned long long)initial_sp[aux_start + 1]);
 
         printf("Initial stack: sp=%p argc=%llu argv[0]=%s\n",
             (void *)initial_sp,
