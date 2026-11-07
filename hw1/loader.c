@@ -9,6 +9,37 @@
 #include <string.h>
 #include <sys/auxv.h>
 
+__attribute__((noreturn))
+void jump_to_target(uintptr_t entry, uintptr_t *initial_sp);
+
+__asm__(
+    ".pushsection .text\n"
+    ".globl jump_to_target\n"
+    ".type jump_to_target, @function\n"
+    "jump_to_target:\n"
+    "mov %rsi, %rsp\n"
+    "mov %rdi, -8(%rsp)\n"
+    "xor %eax, %eax\n"
+    "xor %ebx, %ebx\n"
+    "xor %ecx, %ecx\n"
+    "xor %edx, %edx\n"
+    "xor %esi, %esi\n"
+    "xor %edi, %edi\n"
+    "xor %ebp, %ebp\n"
+    "xor %r8d, %r8d\n"
+    "xor %r9d, %r9d\n"
+    "xor %r10d, %r10d\n"
+    "xor %r11d, %r11d\n"
+    "xor %r12d, %r12d\n"
+    "xor %r13d, %r13d\n"
+    "xor %r14d, %r14d\n"
+    "xor %r15d, %r15d\n"
+    "cld\n"
+    "jmp *-8(%rsp)\n"
+    ".size jump_to_target, .-jump_to_target\n"
+    ".popsection\n"
+);
+
 // a simple file path reader
 int main (int argc, char *argv[])
 {
@@ -173,6 +204,7 @@ int main (int argc, char *argv[])
 
     Elf64_Addr target_phdr = 0;
     int found_phdr = 0;
+    int entry_valid = 0;
     Elf64_Xword phdr_size =
     (Elf64_Xword)header.e_phnum * header.e_phentsize;
 
@@ -190,6 +222,12 @@ int main (int argc, char *argv[])
 
         if (bytes_read != (ssize_t)sizeof(segment)) {
             fprintf(stderr, "Could not read the complete program header entry\n");
+            close(fd);
+            return 1;
+        }
+
+        if (header.e_type == ET_EXEC && segment.p_type == PT_INTERP) {
+            fprintf(stderr, "Dynamically linked targets are not supported\n");
             close(fd);
             return 1;
         }
@@ -356,6 +394,12 @@ int main (int argc, char *argv[])
                             "Mapped address=%p offset=N/A length=0x%llx\n",
                             mapped, (unsigned long long)anon_length);
                 }
+
+                if ((segment.p_flags & PF_X) &&
+                    header.e_entry >= segment.p_vaddr &&
+                    header.e_entry < file_end) {
+                    entry_valid = 1;
+                }
                 if (!found_phdr && (segment.p_flags & PF_R) &&
                     header.e_phoff >= segment.p_offset) {
                     Elf64_Off delta = header.e_phoff - segment.p_offset;
@@ -379,6 +423,10 @@ int main (int argc, char *argv[])
         extern char **environ;
         const size_t stack_size = 1024 * 1024;
         const size_t stack_alignment = 16;
+        if (!entry_valid) {
+            fprintf(stderr, "Entry point is outside executable file-backed segments\n");
+            return 1;
+        }
         if (!found_phdr) {
             fprintf(stderr, "Program header table is not in a readable LOAD segment\n");
             return 1;
@@ -466,6 +514,12 @@ int main (int argc, char *argv[])
             (const char *)initial_sp[1]);
         printf("Stack alignment remainder: %llu\n",
             (unsigned long long)(sp_address % stack_alignment));
+        if (fflush(NULL) == EOF) {
+            perror("fflush");
+            return 1;
+        }
+
+        jump_to_target((uintptr_t)header.e_entry, initial_sp);
     }
 
     // return success
