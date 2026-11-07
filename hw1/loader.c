@@ -6,6 +6,7 @@
 #include <elf.h>
 #include <sys/stat.h>
 #include <stdint.h>
+#include <string.h>
 
 // a simple file path reader
 int main (int argc, char *argv[])
@@ -249,11 +250,8 @@ int main (int argc, char *argv[])
                 (unsigned long long)map_offset,
                 (unsigned long long)map_length);
 
-        if (header.e_type == ET_EXEC &&
-            segment.p_filesz == segment.p_memsz) {
-
+            if (header.e_type == ET_EXEC) {
                 int prot = 0;
-
                 if (segment.p_flags & PF_R) {
                     prot |= PROT_READ;
                 }
@@ -263,39 +261,96 @@ int main (int argc, char *argv[])
                 if (segment.p_flags & PF_X) {
                     prot |= PROT_EXEC;
                 }
-                void *requested = (void *)(uintptr_t)map_start;
 
-                void *mapped = mmap(requested, (size_t)map_length, PROT_READ,
-                                    MAP_PRIVATE | MAP_FIXED_NOREPLACE,
-                                    fd, (off_t)map_offset);
+                Elf64_Addr map_end = map_start + map_length;
+                Elf64_Addr file_end = segment.p_vaddr + segment.p_filesz;
+                Elf64_Addr file_map_end = map_start;
+                Elf64_Xword zero_length = 0;
 
-                if (mapped == MAP_FAILED) {
-                    perror("mmap");
-                    close(fd);
-                    return 1;
+                if (segment.p_filesz > 0) {
+                    Elf64_Xword file_padding =
+                        (page_size - file_end % page_size) % page_size;
+                    file_map_end = file_end + file_padding;
+
+                    Elf64_Addr zero_end = file_map_end;
+                    if (zero_end > segment_end) {
+                        zero_end = segment_end;
+                    }
+                    zero_length = zero_end - file_end;
                 }
 
-                if (mapped != requested) {
-                    fprintf(stderr, "Expected mapping at %p, got %p\n",
-                            requested, mapped);
-                    munmap(mapped, (size_t)map_length);
-                    close(fd);
-                    return 1;
-                }
+                Elf64_Xword file_length = file_map_end - map_start;
+                Elf64_Xword anon_length = map_end - file_map_end;
 
-                const unsigned char *bytes = mapped;
+                if (file_length > 0) {
+                    int file_prot = prot;
+                    if (zero_length > 0) {
+                        file_prot = PROT_READ | PROT_WRITE;
+                    }
 
-                fprintf(stderr, "Mapped address=%p offset=0x%llx length=0x%llx\n",
-                        mapped,
-                        (unsigned long long)map_offset,
-                        (unsigned long long)map_length);
+                    void *requested = (void *)(uintptr_t)map_start;
+                    void *mapped = mmap(requested, (size_t)file_length,
+                                        file_prot,
+                                        MAP_PRIVATE | MAP_FIXED_NOREPLACE,
+                                        fd, (off_t)map_offset);
 
-                if (munmap(mapped, (size_t)map_length) == -1) {
-                        perror("munmap");
+                    if (mapped == MAP_FAILED) {
+                        perror("mmap file");
+                        close(fd);
+                        return 1;
+                    }
+                    if (mapped != requested) {
+                        fprintf(stderr, "Expected mapping at %p, got %p\n",
+                                requested, mapped);
+                        munmap(mapped, (size_t)file_length);
+                        close(fd);
+                        return 1;
+                    }
+
+                    fprintf(stderr,
+                            "Mapped address=%p offset=0x%llx length=0x%llx\n",
+                            mapped,
+                            (unsigned long long)map_offset,
+                            (unsigned long long)file_length);
+
+                    if (zero_length > 0) {
+                        memset((void *)(uintptr_t)file_end, 0,
+                               (size_t)zero_length);
+                    }
+
+                    if (file_prot != prot &&
+                        mprotect(mapped, (size_t)file_length, prot) == -1) {
+                        perror("mprotect");
                         close(fd);
                         return 1;
                     }
                 }
+
+                if (anon_length > 0) {
+                    void *requested = (void *)(uintptr_t)file_map_end;
+                    void *mapped = mmap(requested, (size_t)anon_length, prot,
+                                        MAP_PRIVATE | MAP_ANONYMOUS |
+                                        MAP_FIXED_NOREPLACE,
+                                        -1, 0);
+
+                    if (mapped == MAP_FAILED) {
+                        perror("mmap anonymous");
+                        close(fd);
+                        return 1;
+                    }
+                    if (mapped != requested) {
+                        fprintf(stderr, "Expected mapping at %p, got %p\n",
+                                requested, mapped);
+                        munmap(mapped, (size_t)anon_length);
+                        close(fd);
+                        return 1;
+                    }
+
+                    fprintf(stderr,
+                            "Mapped address=%p offset=N/A length=0x%llx\n",
+                            mapped, (unsigned long long)anon_length);
+                }
+            }
         }
     }
     // if the file is not closed yet, close it(on success path)
