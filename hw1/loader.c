@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <sys/mman.h>
 #include <stdio.h>
 #include <fcntl.h> //to open a file
 #include <unistd.h> //to close a file
@@ -241,10 +243,53 @@ int main (int argc, char *argv[])
                 (unsigned long long)segment.p_filesz,
                 (unsigned long long)segment.p_memsz,
                 (unsigned int)segment.p_flags);
+
             printf("PLAN start=0x%llx offset=0x%llx length=0x%llx\n",
                 (unsigned long long)map_start,
                 (unsigned long long)map_offset,
                 (unsigned long long)map_length);
+
+                if (header.e_type == ET_EXEC &&
+                segment.p_offset == 0 &&
+                segment.p_filesz >= SELFMAG &&
+                map_length == page_size) {
+
+                    void *requested = (void *)(uintptr_t)map_start;
+
+                    void *mapped = mmap(requested, (size_t)map_length, PROT_READ,
+                                        MAP_PRIVATE | MAP_FIXED_NOREPLACE,
+                                        fd, (off_t)map_offset);
+
+                    if (mapped == MAP_FAILED) {
+                        perror("mmap");
+                        close(fd);
+                        return 1;
+                    }
+
+                    if (mapped != requested) {
+                        fprintf(stderr, "Expected mapping at %p, got %p\n",
+                                requested, mapped);
+                        munmap(mapped, (size_t)map_length);
+                        close(fd);
+                        return 1;
+                    }
+
+                    const unsigned char *bytes = mapped;
+
+                    printf("Mapped at %p, first bytes: %02x %02x %02x %02x\n",
+                        mapped,
+                        (unsigned int)bytes[0], (unsigned int)bytes[1],
+                        (unsigned int)bytes[2], (unsigned int)bytes[3]);
+
+                    if (munmap(mapped, (size_t)map_length) == -1) {
+                            perror("munmap");
+                            close(fd);
+                            return 1;
+                        }
+                }
+
+ 
+
         }
 
     }
