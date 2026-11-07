@@ -249,49 +249,54 @@ int main (int argc, char *argv[])
                 (unsigned long long)map_offset,
                 (unsigned long long)map_length);
 
-                if (header.e_type == ET_EXEC &&
-                segment.p_offset == 0 &&
-                segment.p_filesz >= SELFMAG &&
-                map_length == page_size) {
+        if (header.e_type == ET_EXEC &&
+            segment.p_filesz == segment.p_memsz) {
 
-                    void *requested = (void *)(uintptr_t)map_start;
+                int prot = 0;
 
-                    void *mapped = mmap(requested, (size_t)map_length, PROT_READ,
-                                        MAP_PRIVATE | MAP_FIXED_NOREPLACE,
-                                        fd, (off_t)map_offset);
+                if (segment.p_flags & PF_R) {
+                    prot |= PROT_READ;
+                }
+                if (segment.p_flags & PF_W) {
+                    prot |= PROT_WRITE;
+                }
+                if (segment.p_flags & PF_X) {
+                    prot |= PROT_EXEC;
+                }
+                void *requested = (void *)(uintptr_t)map_start;
 
-                    if (mapped == MAP_FAILED) {
-                        perror("mmap");
-                        close(fd);
-                        return 1;
-                    }
+                void *mapped = mmap(requested, (size_t)map_length, PROT_READ,
+                                    MAP_PRIVATE | MAP_FIXED_NOREPLACE,
+                                    fd, (off_t)map_offset);
 
-                    if (mapped != requested) {
-                        fprintf(stderr, "Expected mapping at %p, got %p\n",
-                                requested, mapped);
-                        munmap(mapped, (size_t)map_length);
-                        close(fd);
-                        return 1;
-                    }
-
-                    const unsigned char *bytes = mapped;
-
-                    printf("Mapped at %p, first bytes: %02x %02x %02x %02x\n",
-                        mapped,
-                        (unsigned int)bytes[0], (unsigned int)bytes[1],
-                        (unsigned int)bytes[2], (unsigned int)bytes[3]);
-
-                    if (munmap(mapped, (size_t)map_length) == -1) {
-                            perror("munmap");
-                            close(fd);
-                            return 1;
-                        }
+                if (mapped == MAP_FAILED) {
+                    perror("mmap");
+                    close(fd);
+                    return 1;
                 }
 
- 
+                if (mapped != requested) {
+                    fprintf(stderr, "Expected mapping at %p, got %p\n",
+                            requested, mapped);
+                    munmap(mapped, (size_t)map_length);
+                    close(fd);
+                    return 1;
+                }
 
+                const unsigned char *bytes = mapped;
+
+                fprintf(stderr, "Mapped address=%p offset=0x%llx length=0x%llx\n",
+                        mapped,
+                        (unsigned long long)map_offset,
+                        (unsigned long long)map_length);
+
+                if (munmap(mapped, (size_t)map_length) == -1) {
+                        perror("munmap");
+                        close(fd);
+                        return 1;
+                    }
+                }
         }
-
     }
     // if the file is not closed yet, close it(on success path)
     if (close(fd) == -1) {
