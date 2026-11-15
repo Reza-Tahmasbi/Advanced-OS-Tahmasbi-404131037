@@ -12,6 +12,20 @@
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
 
+static const Elf64_Phdr *find_load_segment(uintptr_t address)
+{
+    for (size_t i=0; i<load_count; i++){
+        const Elf64_Phdr *segment = &load_segments[i];
+
+        if (address >= segment->p_vaddr &&
+            address - segment->p_vaddr < segment->p_memsz) {
+            return segment;
+        }
+    }
+
+    return NULL;
+}
+
 __attribute__((noreturn))
 void jump_to_target(uintptr_t entry, uintptr_t *initial_sp);
 
@@ -450,6 +464,17 @@ int main (int argc, char *argv[])
         extern char **environ;
         const size_t stack_size = 1024 * 1024;
         const size_t stack_alignment = 16;
+        const Elf64_Phdr *entry_segment =
+    find_load_segment((uintptr_t)header.e_entry);
+
+    if (entry_segment == NULL) {
+        fprintf(stderr, "Entry address does not belong to a LOAD segment\n");
+        return 1;
+    }
+
+    fprintf(stderr, "Entry segment: start=0x%llx size=0x%llx\n",
+        (unsigned long long)entry_segment->p_vaddr,
+        (unsigned long long)entry_segment->p_memsz);
         if (!entry_valid) {
             fprintf(stderr, "Entry point is outside executable file-backed segments\n");
             return 1;
