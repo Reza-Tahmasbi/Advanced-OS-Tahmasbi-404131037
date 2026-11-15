@@ -64,6 +64,12 @@ int main (int argc, char *argv[])
         fprintf(stderr, "Usage: %s <program>\n", argv[0]);
         return 1;
     }
+    #ifdef DEMAND_PAGING
+        fprintf(stderr, "Build mode: dpager\n");
+    #else
+        fprintf(stderr, "Build mode: apager\n");
+    #endif
+    
     // open for read_only, fd is the file descriptor
     int fd = open(argv[1], O_RDONLY);
 
