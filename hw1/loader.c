@@ -14,6 +14,11 @@
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
 
+#ifdef DEMAND_PAGING
+static int target_fd = -1;
+static Elf64_Xword pager_page_size = 0;
+#endif
+
 static const Elf64_Phdr *find_load_segment(uintptr_t address)
 {
     for (size_t i=0; i<load_count; i++){
@@ -193,7 +198,9 @@ int main (int argc, char *argv[])
         perror("open");
         return 1;
     }
-
+    #ifdef DEMAND_PAGING
+        target_fd = fd;
+    #endif
     // an array to keep the ELF file first 16 bytes
     unsigned char magic[EI_NIDENT];
     ssize_t bytes_read = read(fd, magic, sizeof(magic));
@@ -340,6 +347,10 @@ int main (int argc, char *argv[])
 
     Elf64_Xword page_size = (Elf64_Xword)page_size_result;
 
+    #ifdef DEMAND_PAGING
+    pager_page_size = page_size;
+    #endif
+
     Elf64_Addr target_phdr = 0;
     int found_phdr = 0;
     int entry_valid = 0;
@@ -461,7 +472,7 @@ int main (int argc, char *argv[])
                 for (Elf64_Addr page = map_start;
                      page < map_start + map_length; page += page_size) {
                     void *mapped =
-                        load_target_page(fd, &segment, page, page_size);
+                        load_target_page(target_fd, &segment, page, pager_page_size);
 
                     if (mapped == MAP_FAILED) {
                         perror("load target page");
@@ -606,10 +617,13 @@ int main (int argc, char *argv[])
     fprintf(stderr, "Stored LOAD segments: %zu\n", load_count);
 
     // if the file is not closed yet, close it(on success path)
+#ifndef DEMAND_PAGING
+    // if the file is not closed yet, close it(on success path)
     if (close(fd) == -1) {
         perror("close");
         return 1;
     }
+#endif
 
     if (header.e_type == ET_EXEC) {
         extern char **environ;
