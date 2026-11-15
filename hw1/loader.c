@@ -9,6 +9,9 @@
 #include <string.h>
 #include <sys/auxv.h>
 
+static Elf64_Phdr *load_segments;
+static size_t load_count = 0;
+
 __attribute__((noreturn))
 void jump_to_target(uintptr_t entry, uintptr_t *initial_sp);
 
@@ -208,6 +211,25 @@ int main (int argc, char *argv[])
     Elf64_Xword phdr_size =
     (Elf64_Xword)header.e_phnum * header.e_phentsize;
 
+    if (header.e_phnum == 0 || header.e_phnum == PN_XNUM) {
+        fprintf(stderr, "Missing or unsupported program header count\n");
+        close(fd);
+        return 1;
+    }
+
+    size_t segment_table_size =
+        (size_t)header.e_phnum * sizeof(*load_segments);
+
+    load_segments = mmap(NULL, segment_table_size,
+                        PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+    if (load_segments == MAP_FAILED) {
+        perror("mmap segment table");
+        close(fd);
+        return 1;
+    }
+
     for (unsigned int i = 0; i< header.e_phnum; i++){
 
         Elf64_Phdr segment;
@@ -293,6 +315,9 @@ int main (int argc, char *argv[])
                 (unsigned long long)map_start,
                 (unsigned long long)map_offset,
                 (unsigned long long)map_length);
+
+            load_segments[load_count] = segment;
+            load_count++;
 
             if (header.e_type == ET_EXEC) {
                 int prot = 0;
@@ -413,6 +438,8 @@ int main (int argc, char *argv[])
             }
         }
     }
+    fprintf(stderr, "Stored LOAD segments: %zu\n", load_count);
+
     // if the file is not closed yet, close it(on success path)
     if (close(fd) == -1) {
         perror("close");
