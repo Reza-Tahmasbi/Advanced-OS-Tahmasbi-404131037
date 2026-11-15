@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g
-LOADER_FLAGS = -fPIE -pie
-TEST_FLAGS = -static -fno-pie -no-pie
+LOADER_FLAGS = -fPIE -pie -Wl,-z,now
+TEST_FLAGS = -static -fno-pie -no-pie -Wl,-z,norelro
 
 .PHONY: all clean
 

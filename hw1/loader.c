@@ -17,6 +17,7 @@ static size_t load_count = 0;
 #ifdef DEMAND_PAGING
 static int target_fd = -1;
 static Elf64_Xword pager_page_size = 0;
+static unsigned char **loaded_pages;
 #endif
 
 static const Elf64_Phdr *find_load_segment(uintptr_t address)
@@ -51,6 +52,17 @@ static void *load_target_page(int fd, const Elf64_Phdr *segment,
         return MAP_FAILED;
     }
 
+    size_t segment_index = (size_t)(segment - load_segments);
+    Elf64_Addr segment_page =
+        segment->p_vaddr - segment->p_vaddr % page_size;
+    Elf64_Xword page_index = (page_start - segment_page) / page_size;
+    unsigned char mask = (unsigned char)(1u << (page_index % 8));
+
+    if (loaded_pages[segment_index][page_index / 8] & mask) {
+        errno = EEXIST;
+        return MAP_FAILED;
+    }
+
     int prot = 0;
     if (segment->p_flags & PF_R) {
         prot |= PROT_READ;
@@ -69,9 +81,6 @@ static void *load_target_page(int fd, const Elf64_Phdr *segment,
     Elf64_Xword zero_length = 0;
 
     if (segment->p_filesz > 0 && page_start < file_end) {
-        Elf64_Addr segment_page =
-            segment->p_vaddr - segment->p_vaddr % page_size;
-
         Elf64_Off file_page =
             segment->p_offset - segment->p_offset % page_size;
 
@@ -120,27 +129,171 @@ static void *load_target_page(int fd, const Elf64_Phdr *segment,
         return MAP_FAILED;
     }
 
+    loaded_pages[segment_index][page_index / 8] |= mask;
     return mapped;
 }
 #endif
 
 #ifdef DEMAND_PAGING
+static size_t append_hex(char *buffer, size_t length, Elf64_Xword value)
+{
+    const char digits[] = "0123456789abcdef";
+
+    buffer[length++] = '0';
+    buffer[length++] = 'x';
+    for (int shift=60; shift>=0; shift-=4){
+        buffer[length++] = digits[(value >> shift) & 0xf];
+    }
+
+    return length;
+}
+
+static void log_page_mapping(const Elf64_Phdr *segment, Elf64_Addr page)
+{
+    char message[128];
+    const char prefix[] = "Mapped address=";
+    const char offset_label[] = " offset=";
+    const char size_label[] = " length=";
+    size_t length = sizeof(prefix) - 1;
+
+    memcpy(message, prefix, length);
+    length = append_hex(message, length, page);
+
+    memcpy(message + length, offset_label, sizeof(offset_label) - 1);
+    length += sizeof(offset_label) - 1;
+
+    Elf64_Addr file_end = segment->p_vaddr + segment->p_filesz;
+    if (segment->p_filesz > 0 && page < file_end) {
+        Elf64_Addr segment_page =
+            segment->p_vaddr - segment->p_vaddr % pager_page_size;
+        Elf64_Off file_page =
+            segment->p_offset - segment->p_offset % pager_page_size;
+        length = append_hex(message, length,
+                            file_page + (page - segment_page));
+    } else {
+        message[length++] = 'N';
+        message[length++] = '/';
+        message[length++] = 'A';
+    }
+
+    memcpy(message + length, size_label, sizeof(size_label) - 1);
+    length += sizeof(size_label) - 1;
+    length = append_hex(message, length, pager_page_size);
+    message[length++] = '\n';
+
+    (void)write(STDERR_FILENO, message, length);
+}
+
+static int prepare_demand_pager(void)
+{
+    size_t table_size = load_count * sizeof(*loaded_pages);
+
+    loaded_pages = mmap(NULL, table_size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (loaded_pages == MAP_FAILED) {
+        return -1;
+    }
+
+    Elf64_Addr previous_end = 0;
+
+    for (size_t i=0; i<load_count; i++){
+        const Elf64_Phdr *segment = &load_segments[i];
+        Elf64_Addr start =
+            segment->p_vaddr - segment->p_vaddr % pager_page_size;
+        Elf64_Addr end = segment->p_vaddr + segment->p_memsz;
+        end += (pager_page_size - end % pager_page_size) % pager_page_size;
+
+        if (i > 0 && start < previous_end) {
+            fprintf(stderr, "Overlapping or unordered LOAD pages are not supported\n");
+            errno = EINVAL;
+            return -1;
+        }
+        previous_end = end;
+
+        Elf64_Xword page_count = (end - start) / pager_page_size;
+        size_t bitmap_size =
+            (size_t)(page_count / 8 + (page_count % 8 != 0));
+
+        loaded_pages[i] = mmap(NULL, bitmap_size,
+                               PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (loaded_pages[i] == MAP_FAILED) {
+            return -1;
+        }
+    }
+
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps == NULL) {
+        return -1;
+    }
+
+    char line[1024];
+    while (fgets(line, sizeof(line), maps) != NULL) {
+        unsigned long mapped_start, mapped_end;
+        if (sscanf(line, "%lx-%lx", &mapped_start, &mapped_end) != 2) {
+            continue;
+        }
+
+        for (size_t i=0; i<load_count; i++){
+            const Elf64_Phdr *segment = &load_segments[i];
+            Elf64_Addr start =
+                segment->p_vaddr - segment->p_vaddr % pager_page_size;
+            Elf64_Addr end = segment->p_vaddr + segment->p_memsz;
+            end += (pager_page_size - end % pager_page_size) % pager_page_size;
+
+            if (start < (Elf64_Addr)mapped_end &&
+                (Elf64_Addr)mapped_start < end) {
+                fprintf(stderr, "Target LOAD overlaps an existing mapping\n");
+                fclose(maps);
+                errno = EEXIST;
+                return -1;
+            }
+        }
+    }
+
+    if (ferror(maps)) {
+        fclose(maps);
+        errno = EIO;
+        return -1;
+    }
+
+    return fclose(maps);
+}
+
 static void segv_handler(int sig, siginfo_t *info, void *context)
 {
     (void)context;
 
+    int saved_errno = errno;
     uintptr_t address = (uintptr_t)info->si_addr;
     const Elf64_Phdr *segment = find_load_segment(address);
 
+    if (segment != NULL && info->si_code == SEGV_MAPERR) {
+        Elf64_Addr page = address - address % pager_page_size;
+        void *mapped =
+            load_target_page(target_fd, segment, page, pager_page_size);
+
+        if (mapped != MAP_FAILED) {
+            log_page_mapping(segment, page);
+            errno = saved_errno;
+            return;
+        }
+    }
+
     if (segment != NULL) {
-        const char message[] = "SIGSEGV inside a target LOAD segment\n";
+        const char message[] = "Unrecoverable SIGSEGV inside a target LOAD segment\n";
         (void)write(STDERR_FILENO, message, sizeof(message) - 1);
     } else {
         const char message[] = "SIGSEGV outside target LOAD segments\n";
         (void)write(STDERR_FILENO, message, sizeof(message) - 1);
     }
 
-    if (raise(sig) != 0) {
+    struct sigaction action = {0};
+    action.sa_handler = SIG_DFL;
+
+    if (sigemptyset(&action.sa_mask) == -1 ||
+        sigaction(sig, &action, NULL) == -1 ||
+        raise(sig) != 0) {
         _exit(128 + sig);
     }
 }
@@ -273,6 +426,12 @@ int main (int argc, char *argv[])
         return 1;
     }
 
+    if (header.e_type != ET_EXEC) {
+        fprintf(stderr, "Only non-PIE ET_EXEC targets are supported\n");
+        close(fd);
+        return 1;
+    }
+
     if (header.e_machine != EM_X86_64){
         fprintf(stderr, "Unsupported ELF machine\n");
         close(fd);
@@ -400,6 +559,14 @@ int main (int argc, char *argv[])
             return 1;
         }
 
+#ifdef DEMAND_PAGING
+        if (segment.p_type == PT_GNU_RELRO && segment.p_memsz > 0) {
+            fprintf(stderr, "Build demand-paging targets with -Wl,-z,norelro\n");
+            close(fd);
+            return 1;
+        }
+#endif
+
         // inspect segment.p_type here
         if (segment.p_type == PT_LOAD) {
             if (segment.p_filesz > segment.p_memsz) {
@@ -468,33 +635,6 @@ int main (int argc, char *argv[])
             if (header.e_type == ET_EXEC) {
                 #ifdef DEMAND_PAGING
                 Elf64_Addr file_end = segment.p_vaddr + segment.p_filesz;
-
-                for (Elf64_Addr page = map_start;
-                     page < map_start + map_length; page += page_size) {
-                    void *mapped =
-                        load_target_page(target_fd, &segment, page, pager_page_size);
-
-                    if (mapped == MAP_FAILED) {
-                        perror("load target page");
-                        close(fd);
-                        return 1;
-                    }
-
-                    if (segment.p_filesz > 0 && page < file_end) {
-                        Elf64_Off offset = map_offset + (page - map_start);
-
-                        fprintf(stderr,
-                                "Mapped address=%p offset=0x%llx length=0x%llx\n",
-                                mapped,
-                                (unsigned long long)offset,
-                                (unsigned long long)page_size);
-                    } else {
-                        fprintf(stderr,
-                                "Mapped address=%p offset=N/A length=0x%llx\n",
-                                mapped,
-                                (unsigned long long)page_size);
-                    }
-                }
                 #else
                 int prot = 0;
                 if (segment.p_flags & PF_R) {
@@ -737,9 +877,42 @@ int main (int argc, char *argv[])
         }
 
         #ifdef DEMAND_PAGING
+            stack_t signal_stack = {0};
+            signal_stack.ss_size = (size_t)SIGSTKSZ;
+            signal_stack.ss_sp =
+                mmap(NULL, signal_stack.ss_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+            if (signal_stack.ss_sp == MAP_FAILED) {
+                perror("mmap signal stack");
+                return 1;
+            }
+            if (sigaltstack(&signal_stack, NULL) == -1) {
+                perror("sigaltstack");
+                return 1;
+            }
+
+            if (prepare_demand_pager() == -1) {
+                perror("prepare demand pager");
+                return 1;
+            }
+
+            Elf64_Addr entry_page =
+                header.e_entry - header.e_entry % pager_page_size;
+
+            if (load_target_page(target_fd, entry_segment,
+                                 entry_page, pager_page_size) == MAP_FAILED) {
+                perror("load entry page");
+                return 1;
+            }
+
+            log_page_mapping(entry_segment, entry_page);
+            fprintf(stderr, "Initial target pages: 1\n");
+
             struct sigaction action = {0};
             action.sa_sigaction = segv_handler;
-            action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+            action.sa_flags = SA_SIGINFO | SA_ONSTACK;
 
             if (sigemptyset(&action.sa_mask) == -1 ||
                 sigaction(SIGSEGV, &action, NULL) == -1) {
