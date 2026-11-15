@@ -1,6 +1,9 @@
 #include <stdio.h>
 
+#ifndef BUFFER_SIZE
 #define BUFFER_SIZE (1024 * 1024)
+#endif
+
 #define TEST_VALUE 0x5a
 
 int initial_value = 123;

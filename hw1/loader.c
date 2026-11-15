@@ -11,6 +11,10 @@
 #include <signal.h>
 #include <errno.h>
 
+#ifndef HYBRID_PAGES_PER_FAULT
+#define HYBRID_PAGES_PER_FAULT 2
+#endif
+
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
 
@@ -274,7 +278,30 @@ static void segv_handler(int sig, siginfo_t *info, void *context)
             load_target_page(target_fd, segment, page, pager_page_size);
 
         if (mapped != MAP_FAILED) {
+            const char message[] = "Handled page fault\n";
+            (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+
             log_page_mapping(segment, page);
+
+#ifdef HYBRID_PAGING
+            Elf64_Addr segment_end =
+                segment->p_vaddr + segment->p_memsz;
+            Elf64_Addr predicted_page = page;
+
+            for (unsigned int i=1; i<HYBRID_PAGES_PER_FAULT; i++){
+                predicted_page += pager_page_size;
+
+                if (predicted_page >= segment_end) {
+                    break;
+                }
+
+                if (load_target_page(target_fd, segment, predicted_page,
+                                     pager_page_size) != MAP_FAILED) {
+                    log_page_mapping(segment, predicted_page);
+                }
+            }
+#endif
+
             errno = saved_errno;
             return;
         }
@@ -337,7 +364,10 @@ int main (int argc, char *argv[])
         fprintf(stderr, "Usage: %s <program>\n", argv[0]);
         return 1;
     }
-    #ifdef DEMAND_PAGING
+
+    #if defined(HYBRID_PAGING)
+        fprintf(stderr, "Build mode: hpager\n");
+    #elif defined(DEMAND_PAGING)
         fprintf(stderr, "Build mode: dpager\n");
     #else
         fprintf(stderr, "Build mode: apager\n");
@@ -898,6 +928,36 @@ int main (int argc, char *argv[])
                 return 1;
             }
 
+            #ifdef HYBRID_PAGING
+            size_t initial_pages = 0;
+
+            for (size_t i=0; i<load_count; i++){
+                const Elf64_Phdr *segment = &load_segments[i];
+
+                if (segment->p_filesz == 0) {
+                    continue;
+                }
+
+                Elf64_Addr first_page =
+                    segment->p_vaddr - segment->p_vaddr % pager_page_size;
+                Elf64_Addr file_end =
+                    segment->p_vaddr + segment->p_filesz;
+
+                for (Elf64_Addr page=first_page;
+                     page<file_end; page+=pager_page_size){
+                    if (load_target_page(target_fd, segment, page,
+                                         pager_page_size) == MAP_FAILED) {
+                        perror("load initial hybrid page");
+                        return 1;
+                    }
+
+                    log_page_mapping(segment, page);
+                    initial_pages++;
+                }
+            }
+
+            fprintf(stderr, "Initial target pages: %zu\n", initial_pages);
+#else
             Elf64_Addr entry_page =
                 header.e_entry - header.e_entry % pager_page_size;
 
@@ -909,6 +969,7 @@ int main (int argc, char *argv[])
 
             log_page_mapping(entry_segment, entry_page);
             fprintf(stderr, "Initial target pages: 1\n");
+#endif
 
             struct sigaction action = {0};
             action.sa_sigaction = segv_handler;
