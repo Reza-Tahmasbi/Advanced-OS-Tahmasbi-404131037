@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/auxv.h>
+#include <signal.h>
 
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
@@ -25,6 +26,28 @@ static const Elf64_Phdr *find_load_segment(uintptr_t address)
 
     return NULL;
 }
+
+#ifdef DEMAND_PAGING
+static void segv_handler(int sig, siginfo_t *info, void *context)
+{
+    (void)context;
+
+    uintptr_t address = (uintptr_t)info->si_addr;
+    const Elf64_Phdr *segment = find_load_segment(address);
+
+    if (segment != NULL) {
+        const char message[] = "SIGSEGV inside a target LOAD segment\n";
+        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    } else {
+        const char message[] = "SIGSEGV outside target LOAD segments\n";
+        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    }
+
+    if (raise(sig) != 0) {
+        _exit(128 + sig);
+    }
+}
+#endif
 
 __attribute__((noreturn))
 void jump_to_target(uintptr_t entry, uintptr_t *initial_sp);
@@ -69,7 +92,7 @@ int main (int argc, char *argv[])
     #else
         fprintf(stderr, "Build mode: apager\n");
     #endif
-    
+
     // open for read_only, fd is the file descriptor
     int fd = open(argv[1], O_RDONLY);
 
@@ -576,6 +599,18 @@ int main (int argc, char *argv[])
             perror("fflush");
             return 1;
         }
+
+        #ifdef DEMAND_PAGING
+            struct sigaction action = {0};
+            action.sa_sigaction = segv_handler;
+            action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+
+            if (sigemptyset(&action.sa_mask) == -1 ||
+                sigaction(SIGSEGV, &action, NULL) == -1) {
+                perror("install SIGSEGV handler");
+                return 1;
+            }
+        #endif
 
         jump_to_target((uintptr_t)header.e_entry, initial_sp);
     }
