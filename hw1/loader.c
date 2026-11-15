@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/auxv.h>
 #include <signal.h>
+#include <errno.h>
 
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
@@ -26,6 +27,97 @@ static const Elf64_Phdr *find_load_segment(uintptr_t address)
 
     return NULL;
 }
+
+#ifdef DEMAND_PAGING
+static void *load_target_page(int fd, const Elf64_Phdr *segment,
+                              Elf64_Addr page_start, Elf64_Xword page_size)
+{
+    if (page_size == 0 || page_start % page_size != 0 ||
+        page_start > UINT64_MAX - page_size) {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+
+    Elf64_Addr page_end = page_start + page_size;
+    Elf64_Addr segment_end = segment->p_vaddr + segment->p_memsz;
+
+    if (page_start >= segment_end || page_end <= segment->p_vaddr) {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+
+    int prot = 0;
+    if (segment->p_flags & PF_R) {
+        prot |= PROT_READ;
+    }
+    if (segment->p_flags & PF_W) {
+        prot |= PROT_WRITE;
+    }
+    if (segment->p_flags & PF_X) {
+        prot |= PROT_EXEC;
+    }
+
+    Elf64_Addr file_end = segment->p_vaddr + segment->p_filesz;
+    int flags = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+    int map_fd = -1;
+    off_t offset = 0;
+    Elf64_Xword zero_length = 0;
+
+    if (segment->p_filesz > 0 && page_start < file_end) {
+        Elf64_Addr segment_page =
+            segment->p_vaddr - segment->p_vaddr % page_size;
+
+        Elf64_Off file_page =
+            segment->p_offset - segment->p_offset % page_size;
+
+        offset = (off_t)(file_page + (page_start - segment_page));
+        map_fd = fd;
+
+        if (file_end < page_end && file_end < segment_end) {
+            Elf64_Addr zero_end = page_end;
+            if (zero_end > segment_end) {
+                zero_end = segment_end;
+            }
+            zero_length = zero_end - file_end;
+        }
+    } else {
+        flags |= MAP_ANONYMOUS;
+    }
+
+    int map_prot = prot;
+    if (zero_length > 0) {
+        map_prot = PROT_READ | PROT_WRITE;
+    }
+
+    void *requested = (void *)(uintptr_t)page_start;
+    void *mapped = mmap(requested, (size_t)page_size,
+                        map_prot, flags, map_fd, offset);
+
+    if (mapped == MAP_FAILED) {
+        return MAP_FAILED;
+    }
+
+    if (mapped != requested) {
+        munmap(mapped, (size_t)page_size);
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+
+    if (zero_length > 0) {
+        memset((void *)(uintptr_t)file_end, 0, (size_t)zero_length);
+    }
+
+    if (map_prot != prot &&
+        mprotect(mapped, (size_t)page_size, prot) == -1) {
+        int saved_errno = errno;
+        munmap(mapped, (size_t)page_size);
+        errno = saved_errno;
+        return MAP_FAILED;
+    }
+
+    return mapped;
+}
+#endif
 
 #ifdef DEMAND_PAGING
 static void segv_handler(int sig, siginfo_t *info, void *context)
@@ -363,6 +455,36 @@ int main (int argc, char *argv[])
             load_count++;
 
             if (header.e_type == ET_EXEC) {
+                #ifdef DEMAND_PAGING
+                Elf64_Addr file_end = segment.p_vaddr + segment.p_filesz;
+
+                for (Elf64_Addr page = map_start;
+                     page < map_start + map_length; page += page_size) {
+                    void *mapped =
+                        load_target_page(fd, &segment, page, page_size);
+
+                    if (mapped == MAP_FAILED) {
+                        perror("load target page");
+                        close(fd);
+                        return 1;
+                    }
+
+                    if (segment.p_filesz > 0 && page < file_end) {
+                        Elf64_Off offset = map_offset + (page - map_start);
+
+                        fprintf(stderr,
+                                "Mapped address=%p offset=0x%llx length=0x%llx\n",
+                                mapped,
+                                (unsigned long long)offset,
+                                (unsigned long long)page_size);
+                    } else {
+                        fprintf(stderr,
+                                "Mapped address=%p offset=N/A length=0x%llx\n",
+                                mapped,
+                                (unsigned long long)page_size);
+                    }
+                }
+                #else
                 int prot = 0;
                 if (segment.p_flags & PF_R) {
                     prot |= PROT_READ;
@@ -462,7 +584,7 @@ int main (int argc, char *argv[])
                             "Mapped address=%p offset=N/A length=0x%llx\n",
                             mapped, (unsigned long long)anon_length);
                 }
-
+#endif
                 if ((segment.p_flags & PF_X) &&
                     header.e_entry >= segment.p_vaddr &&
                     header.e_entry < file_end) {
