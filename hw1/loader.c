@@ -15,6 +15,14 @@
 #define HYBRID_PAGES_PER_FAULT 2
 #endif
 
+#if defined(HYBRID_PAGING) && !defined(DEMAND_PAGING)
+#error "HYBRID_PAGING requires DEMAND_PAGING"
+#endif
+
+#if defined(HYBRID_PAGING) && HYBRID_PAGES_PER_FAULT < 1
+#error "HYBRID_PAGES_PER_FAULT must be at least 1"
+#endif
+
 static Elf64_Phdr *load_segments;
 static size_t load_count = 0;
 
@@ -599,6 +607,15 @@ int main (int argc, char *argv[])
 
         // inspect segment.p_type here
         if (segment.p_type == PT_LOAD) {
+            if (segment.p_align > 1 &&
+                ((segment.p_align & (segment.p_align - 1)) != 0 ||
+                 segment.p_vaddr % segment.p_align !=
+                 segment.p_offset % segment.p_align)) {
+                fprintf(stderr, "Invalid LOAD segment alignment\n");
+                close(fd);
+                return 1;
+            }
+
             if (segment.p_filesz > segment.p_memsz) {
                 fprintf(stderr, "Segment file size exceeds memory size\n");
                 close(fd);
